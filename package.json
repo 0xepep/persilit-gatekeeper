@@ -1,0 +1,1 @@
+{"description":"Proof Gatekeeper agent (decision-only v1) for zkVerify Agent Games — no proof generation yet, see proof.js","engines":{"node":">=18"},"license":"UNLICENSED","main":"server.js","name":"zkverify-gatekeeper","private":true,"scripts":{"start":"node server.js","test":"node --test test.js"},"type":"commonjs","version":"1.0.0"}

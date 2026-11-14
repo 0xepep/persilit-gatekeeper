@@ -1,0 +1,22 @@
+# Render Blueprint — persilit Gatekeeper (v1, decision-only)
+# Cara pakai: push repo ini ke GitHub, lalu di dashboard.render.com:
+# New -> Blueprint -> pilih repo ini -> Apply. Render membuat Web Service
+# dari file ini. Isi AGENT_GAMES_HMAC_SECRET manual di dashboard Render
+# (nilai dari Agent Games dashboard: Register agent -> Rotate Secret).
+# JANGAN commit secret apa pun ke repo.
+services:
+  - type: web
+    name: persilit-gatekeeper
+    runtime: node
+    buildCommand: echo "zero dependencies - nothing to build"
+    startCommand: node server.js
+    healthCheckPath: /health
+    envVars:
+      - key: AGENT_GAMES_HMAC_SECRET
+        sync: false
+      - key: SEEN_FILE
+        value: /tmp/seen.json
+      - key: ALLOW_UNSIGNED_TASKS
+        value: "false"
+      - key: PROOF_ENABLED
+        value: "false"
