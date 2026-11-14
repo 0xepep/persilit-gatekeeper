@@ -1,49 +1,66 @@
 # Deploy Gatekeeper — langkah demi langkah
 
 Status kode: siap deploy. Server terverifikasi lokal (18/18 test PASS, smoke
-test: unsigned -> 401, signed valid -> APPROVE, replay -> PROOF_REUSED).
-File `render.yaml` sudah ada di repo ini, jadi Deploy ke Render tinggal
-sambungkan repo — tidak perlu isi build/start command manual.
+test: unsigned -> 401, signed valid -> APPROVE, replay -> PROOF_REUSED;
+simulasi entry Vercel lokal juga PASS, lihat README).
+Repo: https://github.com/0xepep/persilit-gatekeeper (publik).
+Agent `persilit` sudah terdaftar di dashboard Agent Games (15 Nov 2026),
+endpoint masih kosong.
+
+## Pilihan hosting: Vercel (dipilih 15 Nov 2026)
+
+Render awalnya dipilih, tapi **mentok 15 Nov 2026 ~04:31 WIB: Render
+wajibkan kartu kredit untuk verifikasi identitas** (otorisasi sementara
+$1, menurut Render tidak ditagih) bahkan untuk Free tier — muncul saat
+klik "Deploy web service". Akun Render sudah dibuat + terverifikasi
+email, form Web Service sudah terisi, tapi tidak ada kartu yang
+dimasukkan. Vercel Hobby gratis dan **tidak minta kartu**. Fly.io juga
+butuh kartu. Kalau suatu saat mau pindah ke Render, `render.yaml` masih
+ada di repo.
 
 ## Yang masih butuh user (tidak bisa dikerjakan dari VM ini)
 
-1. **Repo GitHub** — buat repo publik/privat, nama bebas (saran:
-   `persilit-gatekeeper`), push isi folder `gatekeeper/` ini. `gh` CLI ada
-   di VM tapi belum login ke GitHub, jadi push harus dari akun 0xepep.
-2. **Akun Render** — belum ada login Render yang tersimpan. Daftar/login di
-   dashboard.render.com (gratis, tanpa kartu untuk Free tier).
-3. **HMAC secret** — hanya muncul setelah agent didaftarkan di dashboard
-   Agent Games (Manage agents -> Register agent -> Rotate Secret). Secret
-   ini TIDAK BOLEH ditebak atau di-hardcode.
+1. **HMAC secret** — hanya muncul setelah agent didaftarkan di dashboard
+   Agent Games (Manage agents -> agent `persilit` -> Rotate Secret).
+   Secret ini TIDAK BOLEH ditebak atau di-hardcode.
+2. **Endpoint di dashboard Agent Games** — isi URL Vercel setelah deploy
+   (dari HP, karena dashboard login pakai X @juvenzad yang kena limit IP
+   dari VM ini).
 
-## Langkah deploy (setelah 1-3 siap)
+## Langkah deploy (Vercel)
 
-1. Render dashboard -> New -> Blueprint -> pilih repo -> Apply.
-   Render membuat Web Service `persilit-gatekeeper` (Free, Node,
-   Start `node server.js`, Health Check `/health`) dari `render.yaml`.
-2. Di service Render -> Environment -> isi `AGENT_GAMES_HMAC_SECRET`
-   dengan nilai Rotate Secret -> Save (Render redeploy otomatis).
-   Pastikan `ALLOW_UNSIGNED_TASKS=false` dan `PROOF_ENABLED=false`.
-3. Tunggu status `Live`, lalu cek dari browser:
-   `https://persilit-gatekeeper.onrender.com/health`
-   harus `{"status":"ok",...,"hmac_configured":true,...}`.
-4. Di dashboard Agent Games (Manage agents) -> daftarkan endpoint
-   `https://persilit-gatekeeper.onrender.com/task` untuk Proof Gatekeeper.
-5. Jalankan **Practice Mode** dari dashboard: kirim 1 valid + 7 trap,
+1. Vercel (https://vercel.com) -> sign in dengan GitHub 0xepep ->
+   Add New -> Project -> Import `0xepep/persilit-gatekeeper`.
+   Framework Preset: Other. Build Command: kosong (tanpa dependensi).
+   Root Directory: repo root.
+2. Environment Variables (sebelum Deploy):
+   `SEEN_FILE` = `/tmp/seen.json`,
+   `ALLOW_UNSIGNED_TASKS` = `false`,
+   `PROOF_ENABLED` = `false`.
+   `AGENT_GAMES_HMAC_SECRET` BELUM diisi (belum ada secretnya).
+3. Deploy -> tunggu status `Ready`, lalu cek dari browser:
+   `https://persilit-gatekeeper.vercel.app/health`
+   harus `{"status":"ok",...,"hmac_configured":false,...}`.
+   (`hmac_configured: false` normal sebelum secret diisi.)
+4. Di dashboard Agent Games (Manage agents -> agent `persilit`) ->
+   isi endpoint `https://persilit-gatekeeper.vercel.app` (atau
+   `/task` bila dashboard minta URL task lengkap — cek placeholder
+   formnya) -> Rotate Secret -> salin secretnya.
+5. Di Vercel project -> Settings -> Environment Variables -> tambah
+   `AGENT_GAMES_HMAC_SECRET` = nilai Rotate Secret -> Redeploy.
+   Verifikasi ulang `/health`: `hmac_configured` harus `true`.
+6. Jalankan **Practice Mode** dari dashboard: kirim 1 valid + 7 trap,
    pastikan decision + reason_code benar dan response terverifikasi.
-6. Baru ikut ronde scored berikutnya. Jangan ubah kode/secret di tengah
-   ronde yang sedang terbuka.
+7. Baru ikut ronde scored berikutnya (ronde 3: 15 Nov 17:30 WIB).
+   Jangan ubah kode/secret di tengah ronde yang sedang terbuka.
 
 ## Batasan yang harus diketahui sebelum ronde
 
-- **Render Free tidur saat idle.** Request pertama setelah tidur bisa
-  lambat (cold start). Mitigasi: health check/practice menjelang ronde
-  17:30 WIB agar instance bangun. Kalau cold-start bikin timeout di
-  ronde, satu-satunya jalan adalah tier berbayar / host lain.
-- **Seen-set hilang saat restart.** `SEEN_FILE=/tmp/seen.json` di free
-  tier tidak persisten — setelah redeploy/restart, proof yang sudah
-  dipakai bisa lolos lagi sebagai baru. Mitigasi: jangan redeploy di
-  tengah ronde; v1.1 pindahkan seen-set ke KV/Redis gratis.
+- **Seen-set per instance di Vercel.** `SEEN_FILE=/tmp/seen.json`
+  hanya hidup di dalam satu function instance; instance dingin mulai
+  dengan seen-set kosong, jadi proof yang sudah dipakai bisa lolos lagi
+  sebagai baru kalau task-nya jatuh ke instance lain. Mitigasi: jangan
+  redeploy di tengah ronde; v1.1 pindahkan seen-set ke KV/Redis gratis.
 - **v1 decision-only, tanpa proof Groth16.** Tiap jawaban benar tanpa
   proof valid kena -2 ekstra + tanpa bonus reliabilitas +0..+5 (lihat
   README). Itu biaya yang sudah diketahui, bukan bug.

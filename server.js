@@ -4,6 +4,9 @@
  * server.js — Proof Gatekeeper agent endpoint (v1, decision-only).
  *
  * Zero dependencies: only Node.js built-ins (node:http, node:crypto...).
+ * Thin http wrapper around handler.js, which holds all request logic and
+ * is shared with the Vercel serverless entry (api/handler.js) — both
+ * transports behave identically.
  *
  *   GET  /health  -> status, uptime, seen count, proof/hmac config
  *   GET  /        -> service info
@@ -28,61 +31,35 @@
  * immediately rather than timing out silently.
  */
 const http = require('node:http');
-const path = require('node:path');
-const { decide, buildResponse } = require('./decision');
-const { HEADER_NAME, signHeader, verifySignature } = require('./hmac');
-const { SeenSet } = require('./seen');
+const { createHandler, TASK_TYPE, MAX_BODY_BYTES } = require('./handler');
 const proof = require('./proof');
 
-const TASK_TYPE = 'agent-games.proof-gatekeeper.v1';
-const MAX_BODY_BYTES = 1024 * 1024; // 1 MB — tasks are a few KB
-const RESPONSE_DEADLINE_MS = 55_000; // answer well inside the 60 s limit
-
-function json(res, status, obj, extraHeaders) {
-  const body = Buffer.from(JSON.stringify(obj), 'utf8');
-  res.writeHead(status, {
-    'content-type': 'application/json',
-    'content-length': body.length,
-    ...(extraHeaders || {}),
-  });
-  res.end(body);
-}
-
 function createServer(opts = {}) {
-  const secret = opts.secret ?? process.env.AGENT_GAMES_HMAC_SECRET ?? '';
-  const allowUnsigned = opts.allowUnsigned ?? process.env.ALLOW_UNSIGNED_TASKS === 'true';
-  const seenFile = opts.seenFile ?? process.env.SEEN_FILE ?? path.join(__dirname, 'data', 'seen.json');
-  const seen = new SeenSet(seenFile);
-  const startedAt = Date.now();
+  const handler = createHandler(opts);
+  const { seen } = handler;
 
   const server = http.createServer((req, res) => {
-    const started = Date.now();
     try {
-      if (req.method === 'GET' && req.url === '/health') {
-        return json(res, 200, {
-          status: 'ok',
-          service: 'zkverify-gatekeeper-decision-v1',
-          uptime_seconds: Math.floor((Date.now() - startedAt) / 1000),
-          seen_count: seen.size,
-          proof_enabled: proof.isProofEnabled(),
-          proof_status: proof.PROOF_STATUS,
-          hmac_configured: Boolean(secret),
-          timestamp: new Date().toISOString(),
-        });
-      }
-      if (req.method === 'GET' && req.url === '/') {
-        return json(res, 200, {
-          service: 'zkverify-gatekeeper-decision-v1',
-          task_endpoint: 'POST /task',
-          health_endpoint: 'GET /health',
-          proof_status: proof.PROOF_STATUS,
-        });
-      }
-      if (req.method !== 'POST' || req.url !== '/task') {
-        return json(res, 404, { error: 'not_found' });
+      const urlPath = (req.url || '/').split('?')[0];
+      if (req.method === 'GET') {
+        // No body to read for GET.
+        handler.handle(req.method, urlPath, req.headers, Buffer.alloc(0))
+          .then((result) => {
+            const body = JSON.stringify(result.body);
+            res.writeHead(result.status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), ...(result.headers || {}) });
+            res.end(body);
+          })
+          .catch((err) => {
+            console.error(`[server] ${err.stack || err.message}`);
+            if (!res.headersSent) {
+              res.writeHead(500, { 'content-type': 'application/json' });
+              res.end(JSON.stringify({ error: 'internal_error' }));
+            }
+          });
+        return;
       }
 
-      // --- Read the RAW body (needed for HMAC) with a size cap. ---
+      // Read the RAW body (needed for HMAC) with a size cap.
       const chunks = [];
       let size = 0;
       let tooLarge = false;
@@ -92,68 +69,37 @@ function createServer(opts = {}) {
         chunks.push(chunk);
       });
       req.on('end', () => {
-        if (tooLarge) return json(res, 413, { error: 'body_too_large' });
-        const rawBody = Buffer.concat(chunks);
-
-        // --- 1. Verify HMAC against the raw body BEFORE parsing. ---
-        if (secret) {
-          if (!verifySignature(secret, rawBody, req.headers[HEADER_NAME])) {
-            console.warn(`[task] 401 invalid/missing ${HEADER_NAME}`);
-            return json(res, 401, { error: 'invalid_signature' });
-          }
-        } else if (!allowUnsigned) {
-          console.warn('[task] 401 HMAC secret not configured and ALLOW_UNSIGNED_TASKS is not true');
-          return json(res, 401, { error: 'hmac_not_configured' });
-        } else {
-          console.warn('[task] WARNING: accepting unsigned task (ALLOW_UNSIGNED_TASKS=true, local dev only)');
+        if (tooLarge) {
+          res.writeHead(413, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ error: 'body_too_large' }));
+          return;
         }
-
-        // --- 2. Parse only after the signature checks out. ---
-        let task;
-        try {
-          task = JSON.parse(rawBody.toString('utf8'));
-        } catch {
-          return json(res, 400, { error: 'invalid_json' });
-        }
-        if (!task || typeof task !== 'object' || (task.type && task.type !== TASK_TYPE)) {
-          return json(res, 400, { error: 'invalid_task_type', expected: TASK_TYPE });
-        }
-
-        // --- 3. Fail closed if we are already past the task deadline. ---
-        const deadlineMs = task.deadline_at ? Date.parse(task.deadline_at) : NaN;
-        if (!Number.isNaN(deadlineMs) && Date.now() > deadlineMs) {
-          const early = buildResponse({
-            decision: 'REJECT',
-            reason_code: 'EXPIRED_CONDITION',
-            proof_tx: (task.input && task.input.proof_tx) || '',
+        handler.handle(req.method, urlPath, req.headers, Buffer.concat(chunks))
+          .then((result) => {
+            const body = JSON.stringify(result.body);
+            res.writeHead(result.status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), ...(result.headers || {}) });
+            res.end(body);
+          })
+          .catch((err) => {
+            console.error(`[server] ${err.stack || err.message}`);
+            if (!res.headersSent) {
+              res.writeHead(500, { 'content-type': 'application/json' });
+              res.end(JSON.stringify({ error: 'internal_error' }));
+            }
           });
-          const body = JSON.stringify(early);
-          console.warn(`[task] ${task.task_id || '?'} past deadline_at — REJECT EXPIRED_CONDITION`);
-          return json(res, 200, early, secret ? { [HEADER_NAME]: signHeader(secret, body) } : undefined);
-        }
-
-        // --- 4. Decide (pure, synchronous). Proof is v1 stub: decision-only. ---
-        if (proof.isProofEnabled()) {
-          // v1: generateGatekeeperProof() throws; log once per task, do not crash.
-          proof.generateGatekeeperProof(task, null).catch((err) => {
-            console.warn(`[proof] ${err.message}`);
-          });
-        }
-        const result = decide(task, seen);
-        const response = buildResponse(result);
-        const body = JSON.stringify(response);
-        const headers = secret ? { [HEADER_NAME]: signHeader(secret, body) } : undefined;
-
-        if (Date.now() - started > RESPONSE_DEADLINE_MS) {
-          console.warn(`[task] ${task.task_id || '?'} slow response (${Date.now() - started} ms)`);
-        }
-        console.log(`[task] ${task.task_id || '?'} mode=${task.mode || '?'} -> ${result.decision} ${result.reason_code} (${Date.now() - started} ms)`);
-        return json(res, 200, response, headers);
       });
-      req.on('error', () => json(res, 400, { error: 'bad_request' }));
+      req.on('error', () => {
+        if (!res.headersSent) {
+          res.writeHead(400, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ error: 'bad_request' }));
+        }
+      });
     } catch (err) {
       console.error(`[server] ${err.stack || err.message}`);
-      if (!res.headersSent) return json(res, 500, { error: 'internal_error' });
+      if (!res.headersSent) {
+        res.writeHead(500, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: 'internal_error' }));
+      }
     }
   });
 

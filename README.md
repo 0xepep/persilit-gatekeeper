@@ -10,8 +10,10 @@ BELUM aktif** (lihat § Proof di bawah).
 - Hadiah track ini: 100.000 VFY (1st 50.000 / 2nd 30.000 / 3rd 20.000).
   Total pool semua track 400.000 VFY. Entry gratis, semua track tutup 21 Nov 2026.
 - Ronde: 8 ronde harian, 8 task/agent/hari, skor kumulatif.
-  Ronde 1 (13 Nov) sudah lewat. Ronde 2 (14 Nov) sedang live saat repo ini
-  dibuat. **Target realistis: ronde 3–8, 15–20 Nov 2026.**
+  Ronde 1 (13 Nov) dan Ronde 2 (14 Nov) sudah lewat. Agent `persilit`
+  terdaftar 15 Nov 2026 (repo
+  https://github.com/0xepep/persilit-gatekeeper). **Target realistis:
+  ronde 3–8, 15–20 Nov 2026.**
 - Jam arena: 16:00–02:00 IST tiap hari = **17:30–03:30 WIB**.
 - Skor per keputusan: benar +12, salah approve −6, salah reject −3,
   timeout −2. Tanpa proof Groth16 yang valid: −2 ekstra + tanpa bonus
@@ -51,7 +53,10 @@ fail-closed pada langkah yang membutuhkannya (terdokumentasi di
 
 | File | Isi |
 |---|---|
-| `server.js` | HTTP server zero-dependency: `POST /task`, `GET /health`, `GET /` |
+| `server.js` | HTTP server zero-dependency: `POST /task`, `GET /health`, `GET /` (wrapper tipis di atas `handler.js`) |
+| `handler.js` | Inti request (HMAC, parse, decide, sign) — dipakai `server.js` dan `api/handler.js`, perilaku identik |
+| `api/handler.js` | Entry serverless Vercel (`/`, `/health`, `/task` di-rewrite ke sini) |
+| `vercel.json` | Rewrites Vercel: `/`, `/health`, `/task` → `/api/handler` |
 | `decision.js` | Logika murni (tanpa I/O) — mudah dites |
 | `hmac.js` | HMAC-SHA256 sign/verify (`sha256=<hex>`, timing-safe) |
 | `seen.js` | Seen-set `proof_tx`: in-memory + persist ke JSON (atomic rename) |
@@ -106,36 +111,42 @@ curl -s -X POST http://127.0.0.1:3101/task -H 'content-type: application/json' -
 kecuali `ALLOW_UNSIGNED_TASKS=true`. Signature salah/hilang juga 401 —
 tanpa keputusan apa pun.
 
-## Deploy ke HTTPS gratis (dipilih: Render Free Tier)
+## Deploy ke HTTPS gratis (dipilih: Vercel Hobby)
 
-Kenapa Render: free tier punya HTTPS otomatis + deploy dari Git + env vars
-di dashboard + cukup untuk endpoint yang bangun saat ada request. Catatan:
-free instance **sleep setelah idle** — request pertama setelah tidur bisa
-lambat; mitigasi: biarkan platform mengirim health-check/practice, dan
-jangan andalkan cold-start < 60 detik tanpa pemanasan. (Jika cold-start
-jadi masalah di ronde, pindah ke Fly.io free tier — prosesnya mirip,
-tapi butuh `flyctl` + kartu kredit untuk verifikasi akun.)
+Dipilih 15 Nov 2026 setelah **Render mentok: Render wajibkan kartu kredit
+untuk verifikasi identitas** (otorisasi sementara $1) bahkan untuk Free
+tier — muncul saat klik "Deploy web service". Vercel Hobby gratis dan
+**tidak minta kartu**. Server ini diadaptasi ke serverless Vercel tanpa
+mengubah logika keputusan: `handler.js` (inti, dipakai `server.js` dan
+`api/handler.js`), `vercel.json` me-rewrite `/`, `/health`, `/task` ke
+`/api/handler`.
 
-Langkah (BELUM dilakukan — jangan deploy sebelum checklist § Preflight):
+Kenapa Vercel: HTTPS otomatis + deploy dari Git + env vars di dashboard
++ cold start serverless biasanya < 1 detik (jauh di bawah deadline 60
+detik). Catatan: tiap invocasi bisa jalan di instance berbeda, dan
+`/tmp` hanya hidup per instance — `SEEN_FILE=/tmp/seen.json` bisa
+kosong di instance dingin. Itu risiko PROOF_REUSED terlewat. Mitigasi:
+jangan redeploy di tengah ronde; untuk v1.1, pindahkan seen-set ke
+KV/Redis gratis.
 
-1. Push repo ini ke GitHub (repo privat tidak masalah).
-2. Di [dashboard.render.com](https://dashboard.render.com): New → Web Service
-   → pilih repo → Runtime `Node`, Build Command kosong (tanpa dependensi),
-   Start Command `node server.js`.
-3. Instance Type: **Free**. Health Check Path: `/health`.
-4. Environment → tambah:
-   `AGENT_GAMES_HMAC_SECRET` = (nilai Rotate Secret dari Agent Games),
-   `SEEN_FILE` = `/tmp/seen.json` atau path disk yang persisten.
-   ⚠️ Free tier Render **tidak punya persistent disk**: `data/seen.json`
-   hilang saat redeploy/restart. Itu risiko PROOF_REUSED terlewat setelah
-   restart. Mitigasi untuk ronde: (a) jangan redeploy di tengah ronde,
-   (b) untuk v1.1, pindahkan seen-set ke KV/Redis gratis atau simpan
-   `seen.json` di repo privat yang di-commit ulang — keduanya belum
-   diimplementasikan di v1 ini.
-   Jangan set `ALLOW_UNSIGNED_TASKS=true` di Render.
-5. Deploy → tunggu `Live` → cek `https://<nama>.onrender.com/health`
-   harus `{"status":"ok",...}`.
-6. Lanjut ke checklist preflight di bawah.
+Langkah (repo sudah di GitHub, agent sudah terdaftar):
+
+1. Di [vercel.com](https://vercel.com): sign in dengan GitHub 0xepep
+   → Add New → Project → Import `0xepep/persilit-gatekeeper`.
+   Framework Preset: Other. Build Command: kosong (tanpa dependensi).
+   Root Directory: repo root (bukan `gatekeeper/`, karena `api/`,
+   `vercel.json`, dan `server.js` ada di root repo).
+2. Environment Variables → tambah:
+   `SEEN_FILE` = `/tmp/seen.json`,
+   `ALLOW_UNSIGNED_TASKS` = `false`,
+   `PROOF_ENABLED` = `false`.
+   `AGENT_GAMES_HMAC_SECRET` diisi nanti (lihat langkah 3).
+   Jangan set `ALLOW_UNSIGNED_TASKS=true` di Vercel.
+3. Deploy → tunggu `Ready` → cek
+   `https://persilit-gatekeeper.vercel.app/health` harus
+   `{"status":"ok",...}` (saat ini `hmac_configured: false` — normal
+   sebelum secret diisi).
+4. Lanjut ke checklist preflight di bawah.
 
 ## Checklist preflight + practice (dari situs — butuh user/dashboard)
 
@@ -151,10 +162,10 @@ Syarat entry dari halaman event (semua harus centang sebelum ronde):
 
 Urutan yang disarankan:
 
-1. Deploy ke Render (di atas), verifikasi `/health` publik.
-2. Register agent + endpoint di dashboard → ambil HMAC secret via
-   **Rotate Secret** → isi ke env Render → redeploy → verifikasi
-   `/health` (`hmac_configured: true`).
+1. Deploy ke Vercel (di atas), verifikasi `/health` publik.
+2. Daftarkan endpoint di dashboard Agent Games → ambil HMAC secret via
+   **Rotate Secret** → isi ke env Vercel (`AGENT_GAMES_HMAC_SECRET`) →
+   redeploy → verifikasi `/health` (`hmac_configured: true`).
 3. Jalankan **Practice Mode**: kirim/semua 7 jenis trap + 1 valid —
    pastikan `decision` + `reason_code` benar dan response terverifikasi
    tanda tangannya.
@@ -226,9 +237,15 @@ npm test — 18 pass, 0 fail
 Smoke test live (server lokal, mode unsigned): task valid → APPROVE
 `VALID_CONDITION` (1 ms); replay `proof_tx` sama → REJECT `PROOF_REUSED`.
 
+Simulasi entry Vercel lokal (15 Nov 2026, `vercel-smoke-test.js` — bukan
+bagian repo): GET /health → 200 `status: ok`, POST /task unsigned → 401,
+signed valid → APPROVE `VALID_CONDITION` + response terverifikasi,
+replay → REJECT `PROOF_REUSED`. Semua PASS.
+
 ## Yang TIDAK dilakukan di sini
 
-- Tidak deploy ke hosting mana pun, tidak daftar agent/endpoint, tidak
-  kirim proof on-chain, tidak pakai dana/secret apa pun, tidak commit ke
-  GitHub. Semua langkah itu butuh user + secret platform (lihat
-  § Checklist preflight).
+- Repo sudah di GitHub (0xepep/persilit-gatekeeper) dan agent `persilit`
+  sudah terdaftar di dashboard Agent Games (15 Nov 2026). Belum deploy
+  ke hosting, belum daftar endpoint, belum kirim proof on-chain, belum
+  pakai dana/secret apa pun — deploy + secret platform masih butuh
+  langkah di bawah (lihat § Deploy + Checklist preflight).
