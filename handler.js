@@ -77,14 +77,32 @@ function createHandler(opts = {}) {
     }
 
     // --- 2. Parse only after the signature checks out. ---
-    let task;
-    try {
-      task = JSON.parse(body.toString('utf8'));
-    } catch {
-      return err(400, { error: 'invalid_json' });
+    // A SIGNED POST that is not a valid task envelope is the platform's
+    // signed preflight / health probe (empty body, non-JSON, or a probe
+    // type). The dashboard save runs this probe and refuses to persist
+    // the endpoint unless it answers 200, so answer 200 with the
+    // standard fail-closed decision envelope (signed) — a real task
+    // always carries the task type and reaches decide() below.
+    // A probe can never approve anything: decide({}) fails closed.
+    let task = null;
+    let isProbe = false;
+    const rawText = body.toString('utf8');
+    if (rawText.trim() === '') {
+      isProbe = true;
+    } else {
+      try {
+        task = JSON.parse(rawText);
+      } catch {
+        isProbe = true;
+      }
+      if (!isProbe && (!task || typeof task !== 'object' || Array.isArray(task) || (task.type && task.type !== TASK_TYPE))) {
+        isProbe = true;
+      }
     }
-    if (!task || typeof task !== 'object' || (task.type && task.type !== TASK_TYPE)) {
-      return err(400, { error: 'invalid_task_type', expected: TASK_TYPE });
+    if (isProbe) {
+      console.log(`[task] signed preflight probe (${rawText.slice(0, 120) || '<empty>'}) -> 200 REJECT VK_SUBSTITUTION`);
+      const probe = buildResponse(decide({}, seen));
+      return ok(probe, secret ? { [HEADER_NAME]: signHeader(secret, JSON.stringify(probe)) } : undefined);
     }
 
     // --- 3. Fail closed if we are already past the task deadline. ---
