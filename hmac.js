@@ -17,10 +17,13 @@
  * configured, unless ALLOW_UNSIGNED_TASKS=true is set explicitly for
  * local dev — never set that in production / on the registered endpoint.
  *
- * Header format assumed: `sha256=<hex>` (the common GitHub-style form).
- * A bare hex digest is also accepted. This is an ASSUMPTION to confirm
- * in Practice Mode — if the platform uses a different header name or
- * format, adjust here only, and re-run the tests.
+ * Header format CONFIRMED from the live platform preflight (2026-11-15,
+ * Vercel runtime log): the platform sends a BARE hex digest
+ * (`x-agent-games-signature: <64 hex chars>`, no `sha256=` prefix) and
+ * expects the same bare-hex format on responses — a `sha256=`-prefixed
+ * response signature fails its verification ("must return signed
+ * protocol-v1 JSON"). Incoming verification still accepts both forms
+ * (lenient inbound, strict outbound).
  */
 const crypto = require('node:crypto');
 
@@ -42,9 +45,10 @@ function hmacHex(secret, rawBody) {
   return crypto.createHmac('sha256', secret).update(body).digest('hex');
 }
 
-/** Full header value to send: `sha256=<hex>`. */
+/** Response header value: BARE hex digest (no prefix) — the format the
+ *  platform itself uses and verifies. See the header comment above. */
 function signHeader(secret, rawBody) {
-  return `sha256=${hmacHex(secret, rawBody)}`;
+  return hmacHex(secret, rawBody);
 }
 
 /**
