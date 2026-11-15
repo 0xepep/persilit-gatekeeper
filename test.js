@@ -229,3 +229,27 @@ test('http: /health ok; /task 401 unsigned/bad sig; 200 + signed APPROVE with go
   assert.ok(seenOnDisk.proof_tx.includes(task.input.proof_tx.toLowerCase()));
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+test('http: signed preflight probe -> 200 { ok: true, protocolVersion: "v1" }, signed', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gk-preflight-'));
+  const secret = 'test-platform-secret';
+  const { server } = createServer({ secret, seenFile: path.join(dir, 'seen.json'), allowUnsigned: false });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+
+  const probeBody = JSON.stringify({ type: 'agent-games.preflight.v1', agent_id: '28273fac-a1bc-4212-a8bc-c0f2f09e990e', issued_at: new Date().toISOString(), nonce: '72de5ccc-a9a6-48bb-b1c8-9aa9839ef714' });
+  const pre = await httpRequest(port, { method: 'POST', path: '/task', headers: { 'content-type': 'application/json', [HEADER_NAME]: signHeader(secret, probeBody) }, body: probeBody });
+  assert.equal(pre.status, 200);
+  assert.deepEqual(JSON.parse(pre.body), { ok: true, protocolVersion: 'v1' });
+  assert.ok(pre.headers[HEADER_NAME], 'preflight response must carry x-agent-games-signature');
+  assert.equal(verifySignature(secret, Buffer.from(pre.body, 'utf8'), pre.headers[HEADER_NAME]), true);
+
+  // Unsigned probe still 401; other signed non-task bodies still 200 (reject).
+  const unsignedProbe = await httpRequest(port, { method: 'POST', path: '/task', headers: { 'content-type': 'application/json' }, body: probeBody });
+  assert.equal(unsignedProbe.status, 401);
+  const emptyProbe = await httpRequest(port, { method: 'POST', path: '/task', headers: { 'content-type': 'application/json', [HEADER_NAME]: signHeader(secret, '') }, body: '' });
+  assert.equal(emptyProbe.status, 200);
+  assert.equal(JSON.parse(emptyProbe.body).decision, 'REJECT');
+  fs.rmSync(dir, { recursive: true, force: true });
+});

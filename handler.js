@@ -100,6 +100,16 @@ function createHandler(opts = {}) {
       }
     }
     if (isProbe) {
+      // The platform's preflight probe (type agent-games.preflight.v1,
+      // confirmed from the live Vercel log 2026-11-15) expects the
+      // starter-prompt response: { ok: true, protocolVersion: "v1" },
+      // SIGNED. A decision envelope for the probe fails the platform's
+      // preflight validation ("must return signed protocol-v1 JSON").
+      if (task && task.type === 'agent-games.preflight.v1') {
+        const pre = { ok: true, protocolVersion: 'v1' };
+        console.log('[task] signed preflight probe -> 200 { ok: true, protocolVersion: "v1" }');
+        return ok(pre, secret ? { [HEADER_NAME]: signHeader(secret, JSON.stringify(pre)) } : undefined);
+      }
       console.log(`[task] signed preflight probe (${rawText.slice(0, 120) || '<empty>'}) -> 200 REJECT VK_SUBSTITUTION`);
       const probe = buildResponse(decide({}, seen));
       return ok(probe, secret ? { [HEADER_NAME]: signHeader(secret, JSON.stringify(probe)) } : undefined);

@@ -1,1 +1,1 @@
-{"$schema":"https://openapi.vercel.sh/vercel.json","rewrites":[{"destination":"/api/handler","source":"/task"},{"destination":"/api/handler","source":"/health"},{"destination":"/api/handler","source":"/"}]}
+{"$schema":"https://openapi.vercel.sh/vercel.json","rewrites":[{"destination":"/api/handler","source":"/task"},{"destination":"/api/handler","source":"/health"},{"destination":"/api/preflight","source":"/preflight"},{"destination":"/api/handler","source":"/"}]}
