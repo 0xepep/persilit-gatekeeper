@@ -141,9 +141,12 @@ test('hmac: sign/verify round-trip, tampered body and wrong secret fail', (t) =>
   const secret = 'platform-secret-from-rotate-secret';
   const body = Buffer.from(JSON.stringify(makeTask()), 'utf8');
   const header = signHeader(secret, body);
-  assert.ok(header.startsWith('sha256='));
+  // Outbound format is bare hex (platform-confirmed 2026-11-15).
+  assert.match(header, /^[0-9a-f]{64}$/);
   assert.equal(verifySignature(secret, body, header), true);
-  assert.equal(verifySignature(secret, body, header.toUpperCase().replace('SHA256=', 'sha256=')), true);
+  // Inbound verification still accepts the sha256= form and upper case.
+  assert.equal(verifySignature(secret, body, `sha256=${header}`), true);
+  assert.equal(verifySignature(secret, body, header.toUpperCase()), true);
   assert.equal(verifySignature(secret, Buffer.from('{"tampered":true}'), header), false);
   assert.equal(verifySignature('wrong-secret', body, header), false);
   assert.equal(verifySignature(secret, body, 'sha256=00'), false);
