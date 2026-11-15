@@ -63,6 +63,16 @@ function createHandler(opts = {}) {
     const body = Buffer.isBuffer(rawBody) ? rawBody : Buffer.from(rawBody || '');
     if (body.length > MAX_BODY_BYTES) return err(413, { error: 'body_too_large' });
 
+    // TEMPORARY DIAGNOSTIC (remove after the preflight format is confirmed):
+    // log the incoming signature header FORMAT (prefix + length only, never
+    // the value) and the raw body preview, so the platform's exact probe
+    // shape and signing format can be read from the Vercel runtime logs.
+    try {
+      const sigHdr = typeof hdrs[HEADER_NAME] === 'string' ? hdrs[HEADER_NAME] : '';
+      const sigFmt = sigHdr ? (sigHdr.toLowerCase().startsWith('sha256=') ? 'sha256=' : 'bare') : 'missing';
+      console.log(`[diag] POST /task sig=${sigFmt} siglen=${sigHdr.length} bodylen=${body.length} body=${body.toString('utf8').slice(0, 200)}`);
+    } catch { /* diagnostics must never break the request */ }
+
     // --- 1. Verify HMAC against the raw body BEFORE parsing. ---
     if (secret) {
       if (!verifySignature(secret, body, hdrs[HEADER_NAME])) {
