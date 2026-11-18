@@ -1,9 +1,9 @@
-# Proof Gatekeeper — zkVerify Agent Games (v1, decision-only)
+# Proof Gatekeeper — zkVerify Agent Games (v2, proof-backed)
 
 Agent untuk track **Proof Gatekeeper** di [Agent Games](https://agentgames.zkverify.io)
 (cek sumber: 14 Nov 2026). Menjawab task approve/reject pembayaran berbasis
-ZK proof. **v1 ini decision-only: logika keputusan lengkap, proof Groth16
-BELUM aktif** (lihat § Proof di bawah).
+ZK proof. **v2 menghasilkan proof Groth16 lokal per keputusan (snarkjs +
+circuit resmi) dan mengembalikannya di response** (lihat § Proof di bawah).
 
 ## Status kompetisi (terverifikasi 14 Nov 2026)
 
@@ -60,7 +60,7 @@ fail-closed pada langkah yang membutuhkannya (terdokumentasi di
 | `decision.js` | Logika murni (tanpa I/O) — mudah dites |
 | `hmac.js` | HMAC-SHA256 sign/verify (`sha256=<hex>`, timing-safe) |
 | `seen.js` | Seen-set `proof_tx`: in-memory + persist ke JSON (atomic rename) |
-| `proof.js` | **STUB proof Groth16 — sengaja belum aktif, `generateGatekeeperProof()` selalu throw** |
+| `proof.js` | **Proof Groth16 v2 — generate + verifikasi lokal via `snarkjs`, fallback decision-only** |
 | `test.js` | 18 test offline (`npm test`), tanpa jaringan/platform |
 | `.env.example` | Template env (tanpa secret asli) |
 | `data/seen.json` | Dibuat otomatis saat jalan; JANGAN commit (sudah di `.gitignore`) |
@@ -105,7 +105,7 @@ curl -s -X POST http://127.0.0.1:3101/task -H 'content-type: application/json' -
 | `PORT` | Tidak | Default `3000` |
 | `HOST` | Tidak | Default `0.0.0.0` |
 | `SEEN_FILE` | Tidak | Default `./data/seen.json` |
-| `PROOF_ENABLED` | Tidak | `false` di v1. Lihat § Proof |
+| `PROOF_ENABLED` | Tidak | `true` di production (Vercel). Lihat § Proof |
 
 **Tanpa secret:** `POST /task` menjawab 401 (`hmac_not_configured`),
 kecuali `ALLOW_UNSIGNED_TASKS=true`. Signature salah/hilang juga 401 —
@@ -174,29 +174,62 @@ Urutan yang disarankan:
 5. Baru ikut ronde scored berikutnya (mulai ronde 3, 15 Nov 17:30 WIB).
    Jangan ubah kode/secret di tengah ronde yang sedang terbuka.
 
-## Proof (keterbatasan v1 — baca dulu)
+## Proof (v2 — aktif bila `PROOF_ENABLED=true`)
 
-**v1 menjawab decision-only, tanpa proof Groth16.** Konsekuensi skor:
-setiap keputusan benar tanpa proof valid = −2 ekstra dan tanpa bonus
-reliabilitas +0..+5. Keputusan tetap benar; skor per ronde lebih rendah
-dari agent ber-proof. **Proof TIDAK dipalsukan** — platform memverifikasi
-ulang setiap proof dengan key-nya sendiri, jadi proof palsu hanya merugikan.
+**v2 menjawab decision + proof Groth16 lokal.** Setiap keputusan yang
+dapat dibuktikan (semua kecuali `PROOF_REUSED`) digenerate proof-nya
+dengan `snarkjs` + circuit resmi (`circuits/gatekeeper.wasm` +
+`circuits/gatekeeper_final.zkey`), diverifikasi ulang secara lokal,
+lalu dikembalikan di response yang ditandatangani:
 
-Untuk v2 (belum dikerjakan — butuh Kurier API key + download artifacts):
+```json
+{"decision": "APPROVE", "reason_code": "VALID_CONDITION", "proof_tx": "0xa4c1...8ff1", "proof": {"pi_a": [...], "pi_b": [[...]], "pi_c": [...], "protocol": "groth16", "curve": "bn128"}, "public_signals": ["...", "..."]}
+```
 
-- Circuit (Groth16/BN128, Circom 2.x) dari
-  `https://agentgames.zkverify.io/api/circuit-info` (dicek 14 Nov 2026):
+Tanpa Kurier / submit on-chain: platform memverifikasi ulang proof
+terhadap key terdaftarnya sendiri (offline verification). Buktinya:
+tiga agent live independen dengan receipt "proof VERIFIED" di Practice
+Mode memakai format persis ini — lince00/agent-games-gatekeeper,
+hitokarumashaki/agent-games ("the platform accepts proof plus public
+signals alone, no on-chain submission needed"), District-X/
+agent-games-zkverify — dan guide /build §02.5: "generate proofs
+locally with snarkjs, and include the proof in your response."
+
+Skor: keputusan benar + proof valid = +12 dan dihitung untuk bonus
+reliabilitas +0..+5; tanpa proof valid = +10 (−2 ekstra, tanpa bonus).
+Proof yang gagal (input buruk, keputusan salah — circuit menolak
+membangun witness untuk keputusan salah — timeout, artifacts hilang)
+tidak pernah memalsukan proof: handler menjawab decision-only (−2,
+sama seperti v1) dan tidak pernah crash / melewati deadline. Budget
+proof 45 detik, dan dibatasi juga oleh `deadline_at − 5 detik`.
+
+Circuit (Groth16/BN128, Circom 2.x) dari
+`https://agentgames.zkverify.io/api/circuit-info` (dicek 14 Nov 2026,
+artifacts diunduh + diverifikasi 19 Nov 2026):
   - Gatekeeper `vkHash`:
     `0x6b79c6012a6d8651f3e13bc4d2a20370280ab49700c90c5316d4168bfbad77b0`
   - WASM: `https://agentgames.zkverify.io/circuits/gatekeeper.wasm`
+    (1.755.820 bytes, sha256 be00aefe…)
   - zkey: `https://agentgames.zkverify.io/circuits/gatekeeper_final.zkey`
-- Generate proof lokal dengan `snarkjs` (`.zkey` + `.wasm`).
-- Kurier (direkomendasikan guide): API key mainnet → daftarkan verification
-  key sekali → submit proof dengan vkHash → poll sampai `Finalized` →
-  baru kembalikan sebagai confirmed. Alternatif zkVerifyJS butuh akun
-  Volta yang terisi dana — di luar scope build gratis ini.
-- Public inputs / circuit inputs yang tepat harus dibaca dari artifacts +
-  practice task — jangan ditebak.
+    (309.750 bytes, sha256 adfe95a4…)
+  - 13 input: `registeredVkHash, proofVkHash, minimum, publicBalance,
+    expiryBlock, currentBlock, recipient, conditionRecipient, amount,
+    maxTransfer, decision, taskId, salt` (privat, acak per proof).
+    Public signals (13, output-then-public): `[komitmen Poseidon,
+    registeredVkHash, …, decision, taskId]` — taskId TERAKHIR.
+  - Encoding (terverifikasi numerik terhadap public signals yang
+    dipublikasi @dyors): hash VK = BigInt(0x-hex) mod p; taskId =
+    keccak256(UTF-8) mod p; alamat = BigInt(0x-hex) biasa.
+    **Caveat jujur:** platform tidak pernah mempublikasikan encoding
+    taskId; tiga repo publik memakai tiga encoding berbeda (keccak256 /
+    SHA-256 / byte UTF-8 mentah). keccak256 dipakai di sini karena
+    dukungannya terkuat (2 dari 3 repo + reproduksi eksak sinyal publik
+    yang dipublikasi). Praktik menandai VERIFIED untuk ketiganya, jadi
+    praktik tidak bisa membedakan — dan skenario terburuk bila encoding
+    salah adalah hasil v1 (−2, tanpa bonus), tidak pernah lebih buruk.
+- `PROOF_REUSED` tidak membawa proof: aturan skor mengecualikannya,
+  dan circuit tidak bisa membuktikan REJECT atas kondisi yang
+  sebenarnya valid.
 
 ## Asumsi yang harus dikonfirmasi di Practice Mode
 
@@ -212,9 +245,11 @@ Untuk v2 (belum dikerjakan — butuh Kurier API key + download artifacts):
    "already accepted". Implementasi ini sengaja lebih ketat (fail-closed).
    Kalau practice menunjukkan proof yang di-REJECT dikirim ulang secara
    sah, persempit ke APPROVE-only.
-3. **Response hanya 3 field** (`decision`, `reason_code`, `proof_tx`),
-   sesuai contoh di halaman event. Jika platform mengharapkan field
-   proof tambahan, itu bagian dari pekerjaan proof v2.
+3. **Response = 3 field keputusan + `proof` + `public_signals` bila
+   `PROOF_ENABLED=true`** (kecuali `PROOF_REUSED`: tanpa proof).
+   Format ini dikonfirmasi tiga agent live dengan receipt VERIFIED di
+   Practice Mode (lihat § Proof). Contoh di halaman event hanya
+   menampilkan 3 field keputusan karena field proof bersifat tambahan.
 
 ## Hasil test (14 Nov 2026, Node v24.22.1)
 

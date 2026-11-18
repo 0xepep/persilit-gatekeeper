@@ -1,1 +1,19 @@
-{"description":"Proof Gatekeeper agent (decision-only v1) for zkVerify Agent Games — no proof generation yet, see proof.js","engines":{"node":">=18"},"license":"UNLICENSED","main":"server.js","name":"zkverify-gatekeeper","private":true,"scripts":{"start":"node server.js","test":"node --test test.js"},"type":"commonjs","version":"1.0.0"}
+{
+  "description": "Proof Gatekeeper agent (proof-backed v2) for zkVerify Agent Games \u2014 local Groth16 proofs via snarkjs, see proof.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "UNLICENSED",
+  "main": "server.js",
+  "name": "zkverify-gatekeeper",
+  "private": true,
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test --test-concurrency=1 --test-force-exit test.js"
+  },
+  "type": "commonjs",
+  "version": "1.0.0",
+  "dependencies": {
+    "snarkjs": "^0.7.6"
+  }
+}

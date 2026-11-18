@@ -14,13 +14,18 @@
  * HMAC on the raw body, fail-closed decisions, signed responses.
  *
  * Vercel notes:
- *   - Zero dependencies; Node runtime (engines >= 18 in package.json).
+ *   - One dependency (snarkjs); Node runtime (engines >= 18 in package.json).
+ *   - Circuit artifacts (circuits/gatekeeper.wasm, .zkey, verification
+ *     key) are bundled via vercel.json `functions.api/handler.js.includeFiles`.
  *   - SEEN_FILE must be /tmp/seen.json in the Vercel env vars: /tmp is
  *     the only writable path, and it lives only per function instance
  *     (warm). A cold instance starts with an empty seen-set — same
  *     limitation class as Render Free; do not redeploy mid-round.
- *   - Hobby functions answer in milliseconds; the 60 s platform deadline
- *     is comfortably met. Default Hobby timeout (10 s) is not a factor.
+ *   - Hobby functions answer in ~1-2 s including proof generation
+ *     (measured 0.4-1.9 s on a 1.5-CPU VM; Vercel CPUs are faster);
+ *     the 60 s platform deadline is comfortably met. Default Hobby
+ *     timeout (10 s) is not a factor at these timings, and a slow
+ *     proof falls back to decision-only rather than timing out.
  */
 const { createHandler, MAX_BODY_BYTES } = require('../handler');
 

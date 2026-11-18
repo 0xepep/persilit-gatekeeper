@@ -154,11 +154,16 @@ test('hmac: sign/verify round-trip, tampered body and wrong secret fail', (t) =>
   assert.equal(verifySignature('', body, header), false);
 });
 
-// --- Proof stub ---------------------------------------------------------
-test('proof: v1 stub is explicit — generateGatekeeperProof throws, never fakes', async (t) => {
-  assert.equal(proof.PROOF_STATUS, 'not-implemented');
+// --- Proof v2 ----------------------------------------------------------
+test('proof: v2 status is ready; generateGatekeeperProof validates inputs', async (t) => {
+  delete process.env.PROOF_ENABLED;
+  assert.equal(proof.PROOF_STATUS, 'ready');
   assert.equal(proof.isProofEnabled(), false);
-  await assert.rejects(() => proof.generateGatekeeperProof({}, {}), /NOT IMPLEMENTED/);
+  process.env.PROOF_ENABLED = 'true';
+  t.after(() => { delete process.env.PROOF_ENABLED; });
+  assert.equal(proof.isProofEnabled(), true);
+  await assert.rejects(() => proof.generateGatekeeperProof({}, 'APPROVE'), /task\.input missing/);
+  await assert.rejects(() => proof.generateGatekeeperProof(makeTask({ input: { public_balance: 'junk' } }), 'APPROVE'), /not an integer/);
 });
 
 // --- Seen-set persistence ----------------------------------------------
@@ -196,7 +201,7 @@ test('http: /health ok; /task 401 unsigned/bad sig; 200 + signed APPROVE with go
   const { server } = createServer({ secret, seenFile: path.join(dir, 'seen.json'), allowUnsigned: false });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const port = server.address().port;
-  t.after(() => new Promise((resolve) => server.close(resolve)));
+  t.after(() => new Promise((resolve) => { server.closeAllConnections(); server.close(resolve); }));
 
   const health = await httpRequest(port, { method: 'GET', path: '/health' });
   assert.equal(health.status, 200);
@@ -236,7 +241,7 @@ test('http: signed preflight probe -> 200 { ok: true, protocolVersion: "v1" }, s
   const { server } = createServer({ secret, seenFile: path.join(dir, 'seen.json'), allowUnsigned: false });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const port = server.address().port;
-  t.after(() => new Promise((resolve) => server.close(resolve)));
+  t.after(() => new Promise((resolve) => { server.closeAllConnections(); server.close(resolve); }));
 
   const probeBody = JSON.stringify({ type: 'agent-games.preflight.v1', agent_id: '28273fac-a1bc-4212-a8bc-c0f2f09e990e', issued_at: new Date().toISOString(), nonce: '72de5ccc-a9a6-48bb-b1c8-9aa9839ef714' });
   const pre = await httpRequest(port, { method: 'POST', path: '/task', headers: { 'content-type': 'application/json', [HEADER_NAME]: signHeader(secret, probeBody) }, body: probeBody });
@@ -251,5 +256,143 @@ test('http: signed preflight probe -> 200 { ok: true, protocolVersion: "v1" }, s
   const emptyProbe = await httpRequest(port, { method: 'POST', path: '/task', headers: { 'content-type': 'application/json', [HEADER_NAME]: signHeader(secret, '') }, body: '' });
   assert.equal(emptyProbe.status, 200);
   assert.equal(JSON.parse(emptyProbe.body).decision, 'REJECT');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// --- Proof generation (v2): encodings, proving, verification -----------
+// Reference values: @dyors' published public signals for the sample
+// task (dev.to, 2026-11-16), reproduced here from the raw inputs.
+const PLATFORM_VK = '0x6b79c6012a6d8651f3e13bc4d2a20370280ab49700c90c5316d4168bfbad77b0';
+const DYORS_VK_FIELD = '4836144126773920907502496244340012141761656471453348073975163706578152814510';
+const DYORS_TASKID_FIELD = '16506844760414165912080236586659340220318748946289526529754881394918275529611';
+
+test('proof: keccak256 vectors (empty string + sample task_id)', (t) => {
+  const { keccak256Hex } = require('./keccak');
+  assert.equal(keccak256Hex(''), '0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470');
+  const taskIdField = proof.taskIdToField('gk_24_9d1').toString();
+  assert.equal(taskIdField, DYORS_TASKID_FIELD, 'keccak256("gk_24_9d1") mod p must equal dyors public signal [12]');
+  assert.notEqual(taskIdField, '20829714751891584743724278765307997780450844889094878994196554839611267657343', 'must NOT be the SHA-256 value');
+});
+
+test('proof: buildCircuitInput encodes VK hashes + task_id exactly as the published proof', (t) => {
+  const task = makeTask({ input: { registered_vk: PLATFORM_VK, proof_vk: PLATFORM_VK } });
+  const input = proof.buildCircuitInput(task, 'APPROVE');
+  assert.equal(input.registeredVkHash, DYORS_VK_FIELD);
+  assert.equal(input.proofVkHash, DYORS_VK_FIELD);
+  assert.equal(input.taskId, DYORS_TASKID_FIELD);
+  assert.equal(input.minimum, '1000');
+  assert.equal(input.publicBalance, '1460');
+  assert.equal(input.expiryBlock, '19842201');
+  assert.equal(input.currentBlock, '19832000');
+  assert.equal(input.recipient, BigInt('0xDe4200000000000000000000000000000000009f01').toString());
+  assert.equal(input.conditionRecipient, input.recipient);
+  assert.equal(input.amount, '500');
+  assert.equal(input.maxTransfer, '1000');
+  assert.equal(input.decision, '1');
+  assert.match(input.salt, /^[0-9]+$/);
+  assert.notEqual(input.salt, '0');
+  // A second build uses a fresh salt (private, random per proof).
+  assert.notEqual(proof.buildCircuitInput(task, 'APPROVE').salt, input.salt);
+  const rejectInput = proof.buildCircuitInput(task, 'REJECT');
+  assert.equal(rejectInput.decision, '0');
+});
+
+test('proof: valid APPROVE generates a proof that verifies; public signals match the task', async (t) => {
+  const task = makeTask({ input: { registered_vk: PLATFORM_VK, proof_vk: PLATFORM_VK } });
+  task.deadline_at = new Date(Date.now() + 60_000).toISOString();
+  const { proof: grothProof, publicSignals, proofMs } = await proof.generateGatekeeperProof(task, 'APPROVE');
+  console.log(`[test] valid APPROVE proof: ${proofMs}ms`);
+  assert.ok(proofMs < 30_000, `proving took ${proofMs}ms, must fit comfortably inside the 60 s deadline`);
+  assert.equal(publicSignals.length, 13);
+  assert.equal(publicSignals[1], DYORS_VK_FIELD);
+  assert.equal(publicSignals[2], DYORS_VK_FIELD);
+  assert.deepEqual(publicSignals.slice(3, 12), ['1000', '1460', '19842201', '19832000', BigInt('0xDe4200000000000000000000000000000000009f01').toString(), BigInt('0xDe4200000000000000000000000000000000009f01').toString(), '500', '1000', '1']);
+  assert.equal(publicSignals[12], DYORS_TASKID_FIELD);
+  assert.match(publicSignals[0], /^[0-9]+$/, 'public signal [0] is the Poseidon commitment, a field element');
+  const snarkjs = require('snarkjs');
+  assert.equal(await snarkjs.groth16.verify(proof.loadVerificationKey(), publicSignals, grothProof), true);
+});
+
+test('proof: correct REJECT of a trap (recipient mismatch) also proves and verifies', async (t) => {
+  const task = makeTask({ input: { registered_vk: PLATFORM_VK, proof_vk: PLATFORM_VK, recipient: '0xDe420000000000000000000000000000000000dead' } });
+  task.deadline_at = new Date(Date.now() + 60_000).toISOString();
+  const { proof: grothProof, publicSignals, proofMs } = await proof.generateGatekeeperProof(task, 'REJECT');
+  console.log(`[test] trap REJECT proof: ${proofMs}ms`);
+  assert.ok(proofMs < 30_000);
+  assert.equal(publicSignals[11], '0');
+  const snarkjs = require('snarkjs');
+  assert.equal(await snarkjs.groth16.verify(proof.loadVerificationKey(), publicSignals, grothProof), true);
+});
+
+test('proof: wrong decisions are unprovable — fullProve throws (circuit assert)', async (t) => {
+  const valid = makeTask({ input: { registered_vk: PLATFORM_VK, proof_vk: PLATFORM_VK } });
+  await assert.rejects(() => proof.generateGatekeeperProof(valid, 'REJECT'), /Assert Failed|Failed/i);
+  const trap = makeTask({ input: { registered_vk: PLATFORM_VK, proof_vk: PLATFORM_VK, amount: '1001' } });
+  await assert.rejects(() => proof.generateGatekeeperProof(trap, 'APPROVE'), /Assert Failed|Failed/i);
+});
+
+test('proof: timeout budget is enforced (1 ms budget rejects instead of hanging)', async (t) => {
+  const task = makeTask({ input: { registered_vk: PLATFORM_VK, proof_vk: PLATFORM_VK } });
+  await assert.rejects(() => proof.generateGatekeeperProof(task, 'APPROVE', { timeoutMs: 1 }), /exceeded 1ms/);
+});
+
+test('http: PROOF_ENABLED=true -> valid task answers APPROVE with verifying proof + public_signals; replay -> PROOF_REUSED with NO proof', async (t) => {
+  process.env.PROOF_ENABLED = 'true';
+  t.after(() => { delete process.env.PROOF_ENABLED; });
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gk-proof-http-'));
+  const secret = 'test-platform-secret';
+  const { server } = createServer({ secret, seenFile: path.join(dir, 'seen.json'), allowUnsigned: false });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+  t.after(() => new Promise((resolve) => { server.closeAllConnections(); server.close(resolve); }));
+
+  const task = makeTask({ input: { registered_vk: PLATFORM_VK, proof_vk: PLATFORM_VK } });
+  task.deadline_at = new Date(Date.now() + 60_000).toISOString();
+  const raw = JSON.stringify(task);
+  const headers = { 'content-type': 'application/json', [HEADER_NAME]: signHeader(secret, raw) };
+
+  const okRes = await httpRequest(port, { method: 'POST', path: '/task', headers, body: raw });
+  assert.equal(okRes.status, 200);
+  const body = JSON.parse(okRes.body);
+  assert.equal(body.decision, 'APPROVE');
+  assert.equal(body.reason_code, 'VALID_CONDITION');
+  assert.equal(body.proof_tx, task.input.proof_tx);
+  assert.ok(body.proof, 'response must include proof');
+  assert.equal(body.proof.protocol, 'groth16');
+  assert.ok(Array.isArray(body.public_signals) && body.public_signals.length === 13, 'response must include 13 public_signals');
+  assert.equal(body.public_signals[12], DYORS_TASKID_FIELD);
+  const snarkjs = require('snarkjs');
+  assert.equal(await snarkjs.groth16.verify(proof.loadVerificationKey(), body.public_signals, body.proof), true, 'proof in the HTTP response must verify (platform-side check)');
+  assert.equal(verifySignature(secret, Buffer.from(okRes.body, 'utf8'), okRes.headers[HEADER_NAME]), true, 'proof-carrying response must still be HMAC-signed');
+
+  const replay = await httpRequest(port, { method: 'POST', path: '/task', headers, body: raw });
+  assert.equal(JSON.parse(replay.body).decision, 'REJECT');
+  assert.equal(JSON.parse(replay.body).reason_code, 'PROOF_REUSED');
+  assert.equal(JSON.parse(replay.body).proof, undefined, 'PROOF_REUSED carries no proof');
+  assert.equal(JSON.parse(replay.body).public_signals, undefined);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('http: PROOF_ENABLED=true but unprovable task (missing proof_vk) -> decision-only REJECT, no crash, no proof field', async (t) => {
+  process.env.PROOF_ENABLED = 'true';
+  t.after(() => { delete process.env.PROOF_ENABLED; });
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gk-proof-fallback-'));
+  const secret = 'test-platform-secret';
+  const { server } = createServer({ secret, seenFile: path.join(dir, 'seen.json'), allowUnsigned: false });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+  t.after(() => new Promise((resolve) => { server.closeAllConnections(); server.close(resolve); }));
+
+  const task = makeTask();
+  delete task.input.proof_vk;
+  task.deadline_at = new Date(Date.now() + 60_000).toISOString();
+  const raw = JSON.stringify(task);
+  const res = await httpRequest(port, { method: 'POST', path: '/task', headers: { 'content-type': 'application/json', [HEADER_NAME]: signHeader(secret, raw) }, body: raw });
+  assert.equal(res.status, 200);
+  const body = JSON.parse(res.body);
+  assert.equal(body.decision, 'REJECT');
+  assert.equal(body.reason_code, 'VK_SUBSTITUTION');
+  assert.equal(body.proof, undefined);
+  assert.equal(body.public_signals, undefined);
   fs.rmSync(dir, { recursive: true, force: true });
 });

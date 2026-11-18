@@ -1,9 +1,10 @@
 'use strict';
 
 /**
- * server.js — Proof Gatekeeper agent endpoint (v1, decision-only).
+ * server.js — Proof Gatekeeper agent endpoint (v2, proof-backed).
  *
- * Zero dependencies: only Node.js built-ins (node:http, node:crypto...).
+ * One dependency: snarkjs (proof generation, see proof.js). Everything
+ * else is Node.js built-ins (node:http, node:crypto...).
  * Thin http wrapper around handler.js, which holds all request logic and
  * is shared with the Vercel serverless entry (api/handler.js) — both
  * transports behave identically.
@@ -21,7 +22,9 @@
  *     without a signature (logs a warning per request). NEVER on the
  *     registered public endpoint.
  *   SEEN_FILE (default ./data/seen.json) — proof_tx persistence.
- *   PROOF_ENABLED — see proof.js; v1 always answers decision-only.
+ *   PROOF_ENABLED — see proof.js; v2 generates a local Groth16 proof
+ *     per provable decision when true (default in production).
+ *     Any proof failure falls back to decision-only, never crashes.
  *
  * Fail-closed: bad/missing signature -> 401, no decision. Unparseable
  * JSON -> 400, no decision. Unknown task type -> 400. Any decision

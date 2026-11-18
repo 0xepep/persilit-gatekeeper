@@ -12,7 +12,7 @@
  *   { status, body (object), headers } — callers only stringify + send.
  */
 const path = require('node:path');
-const { decide, buildResponse } = require('./decision');
+const { decide, buildResponse, REASON_CODES } = require('./decision');
 const { HEADER_NAME, signHeader, verifySignature } = require('./hmac');
 const { SeenSet } = require('./seen');
 const proof = require('./proof');
@@ -127,21 +127,40 @@ function createHandler(opts = {}) {
       return ok(early, secret ? { [HEADER_NAME]: signHeader(secret, JSON.stringify(early)) } : undefined);
     }
 
-    // --- 4. Decide (pure, synchronous). Proof is v1 stub: decision-only. ---
-    if (proof.isProofEnabled()) {
-      // v1: generateGatekeeperProof() throws; log once per task, do not crash.
-      proof.generateGatekeeperProof(task, null).catch((e) => {
-        console.warn(`[proof] ${e.message}`);
-      });
-    }
+    // --- 4. Decide (pure, synchronous), then prove the decision. ---
+    // Proof is attempted only when PROOF_ENABLED=true and the task is
+    // provable: PROOF_REUSED carries no proof (scoring excludes it, and
+    // the circuit cannot prove rejecting an otherwise-valid condition).
+    // Any proof failure falls back to the decision-only response —
+    // same -2 as v1, never worse — and never blocks the deadline: the
+    // proof budget is capped at 45 s and at (deadline_at - 5 s).
     const result = decide(task, seen);
     const response = buildResponse(result);
+    let proofMs = null;
+    if (proof.isProofEnabled() && result.reason_code !== REASON_CODES.PROOF_REUSED) {
+      let budget = proof.PROOF_TIMEOUT_MS;
+      if (!Number.isNaN(deadlineMs)) {
+        budget = Math.min(budget, Math.max(0, deadlineMs - Date.now() - 5000));
+      }
+      if (budget > 0) {
+        try {
+          const generated = await proof.generateGatekeeperProof(task, result.decision, { timeoutMs: budget });
+          response.proof = generated.proof;
+          response.public_signals = generated.publicSignals;
+          proofMs = generated.proofMs;
+        } catch (e) {
+          console.warn(`[proof] ${task.task_id || '?'} ${e.message} — answering decision-only`);
+        }
+      } else {
+        console.warn(`[proof] ${task.task_id || '?'} no time left before deadline_at — answering decision-only`);
+      }
+    }
     const signed = secret ? { [HEADER_NAME]: signHeader(secret, JSON.stringify(response)) } : undefined;
 
     if (Date.now() - started > RESPONSE_DEADLINE_MS) {
       console.warn(`[task] ${task.task_id || '?'} slow response (${Date.now() - started} ms)`);
     }
-    console.log(`[task] ${task.task_id || '?'} mode=${task.mode || '?'} -> ${result.decision} ${result.reason_code} (${Date.now() - started} ms)`);
+    console.log(`[task] ${task.task_id || '?'} mode=${task.mode || '?'} -> ${result.decision} ${result.reason_code}${proofMs === null ? ' (no proof)' : ` proof ${proofMs}ms`} (${Date.now() - started} ms)`);
     return ok(response, signed);
   }
 

@@ -61,7 +61,9 @@ ada di repo.
   dengan seen-set kosong, jadi proof yang sudah dipakai bisa lolos lagi
   sebagai baru kalau task-nya jatuh ke instance lain. Mitigasi: jangan
   redeploy di tengah ronde; v1.1 pindahkan seen-set ke KV/Redis gratis.
-- **v1 decision-only, tanpa proof Groth16.** Tiap jawaban benar tanpa
-  proof valid kena -2 ekstra + tanpa bonus reliabilitas +0..+5 (lihat
-  README). Itu biaya yang sudah diketahui, bukan bug.
+- **v2 proof-backed (19 Nov 2026): local Groth16 proofs via snarkjs.**
+  Tiap jawaban benar + proof valid = +12 dan dihitung untuk bonus
+  reliabilitas +0..+5 (sebelumnya decision-only: −2 per jawaban benar).
+  Aktif bila env `PROOF_ENABLED=true` (sudah `true` di Vercel).
+  Detail + caveat encoding taskId di `proof.js` / README § Proof.
 - **Jangan set `ALLOW_UNSIGNED_TASKS=true` di endpoint publik.**
